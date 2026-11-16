@@ -1,0 +1,104 @@
+## Add JSON Pointer support for validation errors in Marshmallow
+
+Marshmallow currently returns validation errors as nested dictionaries. This works fine for most Python applications, but it becomes inconvenient when working with APIs or frontend forms that need to identify exactly which field caused an error.
+
+I want to add an optional way to return validation errors as flat dictionaries using JSON Pointer paths (RFC 6901), while keeping the existing error format as the default.
+
+### 1. API changes
+
+Add a new keyword-only argument called `error_format` to `Schema.load()`, `Schema.loads()`, and `Schema.validate()`.
+
+It should support two values:
+
+- `nested`: The current behavior. This should remain the default.
+- `json-pointer`: Return errors as a flat dictionary where each key is a JSON Pointer path.
+
+Passing anything other than these two values, including `None`, should raise a `ValueError`, regardless of whether the input data is valid.
+
+For `load()` and `loads()`, the formatted errors should be available through `ValidationError.messages`. For `validate()`, the method should return the formatted dictionary directly.
+
+### 2. Error paths
+
+When JSON Pointer formatting is enabled, every error should have a complete path starting with `/`.
+
+For example, if the second user in a list has an invalid age, the error should appear under:
+
+`/users/1/age`
+
+Each path should map to a list of error messages. If multiple errors occur at the same location, all messages should be preserved in their original order.
+
+This should work for regular fields, deeply nested schemas, and collections.
+
+The implementation needs to handle:
+
+- `fields.Nested`, including multiple levels of nesting
+- `fields.List`, with both primitive fields and nested schemas
+- `fields.Tuple`, using zero-based indexes
+- `fields.Dict`, including errors from key and value validation
+- Schemas using `many=True`
+- Combinations of these field types
+
+For example, an invalid price in the first item of the third order should produce a path such as `/orders/2/items/0/price`.
+
+No errors should be lost when multiple fields or nested objects fail validation.
+
+### 3. Escaping field names
+
+JSON Pointer has specific escaping rules that need to be followed.
+
+Within each path segment:
+
+- `~` should become `~0`
+- `/` should become `~1`
+
+The replacements must happen in that order.
+
+For example:
+
+- `first/name` becomes `/first~1name`
+- `a~b` becomes `/a~0b`
+
+If a field uses `data_key`, the error path should use that external field name instead of the Python attribute name.
+
+### 4. Schema-level errors
+
+Marshmallow uses `_schema` for errors that aren't associated with a specific field. The new format should keep that convention.
+
+For example:
+
+- An error on the root schema should use `/_schema`.
+- An error on a nested address schema should use `/address/_schema`.
+- An error on the second item in a collection should use `/users/1/_schema`.
+
+If a schema-level validator reports errors against specific fields, those errors should still point to their respective fields rather than being grouped under `_schema`.
+
+### 5. Keep existing behavior unchanged
+
+This feature should be completely optional. Existing applications should continue working without modifications.
+
+When `error_format` is omitted or set to `nested`, Marshmallow should behave exactly as it does now.
+
+Make sure the changes don't affect:
+
+- Existing validation messages and their ordering
+- Error aggregation
+- `ValidationError.valid_data` and `ValidationError.data`
+- `partial`, `unknown`, and `many`
+- Field aliases defined through `data_key`
+- Schema inheritance
+- Validation hooks and `handle_error`
+- Serialization through `dump()` and `dumps()`
+
+Formatting errors into JSON Pointer paths should not modify the original input or the nested error data produced during validation.
+
+### 6. Implementation and testing
+
+The feature should use Marshmallow's existing validation and error-handling flow rather than introducing a separate validation process.
+
+It should also work with custom fields and validators that raise `ValidationError` using supported Marshmallow error structures.
+
+Add tests covering the new argument, invalid format values, nested schemas, collections, escaped field names, schema-level errors, and backward compatibility.
+
+All existing tests should continue passing.
+
+The main goal is to make validation errors easier to consume in API responses without changing how Marshmallow normally validates data or reports errors.
